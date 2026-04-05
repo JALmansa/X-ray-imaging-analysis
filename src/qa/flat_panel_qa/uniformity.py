@@ -3,7 +3,7 @@ import streamlit as st
 
 def _calculate_uniformity_term(val_i, val_mean):
     """
-    Calculates the term abs(val_i - val_mean) / abs(val_mean) for uniformity.
+    Calculates the term abs(val_i - val_mean) / val_mean for uniformity.
     Assumes val_mean is non-negative (typical for pixel values and standard deviations).
 
     Args:
@@ -16,19 +16,22 @@ def _calculate_uniformity_term(val_i, val_mean):
 
     # Both val_i and val_mean are finite at this point
     abs_diff = np.abs(val_i - val_mean)
-    denominator = np.abs(val_mean)
+    denominator = val_mean
 
     # Guard against zero or non-finite denominators which would make the term undefined
-    if not np.isfinite(denominator) or denominator == 0:
+    if not np.isfinite(denominator) or np.isclose(denominator, 0.0):
         return np.nan
 
     return abs_diff / denominator
 
-def _compute_central_roi(image_array):
+def _compute_central_roi(image_array, pixel_spacing_row, pixel_spacing_col, roi_size_mm=30.0):
     """Extract central ROI (80% of total image area).
     
     Args:
         image_array: 2D array of image pixels
+        pixel_spacing_row: Pixel spacing in mm/pixel for rows
+        pixel_spacing_col: Pixel spacing in mm/pixel for columns
+        roi_size_mm: ROI size in mm (default 30mm)
     
     Returns:
         Tuple of (central_roi_data, coords, percent) where:
@@ -42,19 +45,29 @@ def _compute_central_roi(image_array):
     
     if new_H < 1 or new_W < 1:
         return None, None, 0.0
+
+    roi_size_row = int(round(roi_size_mm / pixel_spacing_row))
+    if roi_size_row % 2 != 0:
+        roi_size_row = roi_size_row + 1
+    roi_size_col = int(round(roi_size_mm / pixel_spacing_col))
+    if roi_size_col % 2 != 0:
+        roi_size_col = roi_size_col + 1
+
+    row_rois = int(new_H / roi_size_row)
+    col_rois = int(new_W / roi_size_col)
     
-    start_row = (H_orig - new_H) // 2
-    end_row = start_row + new_H
-    start_col = (W_orig - new_W) // 2
-    end_col = start_col + new_W
+    start_row = int(round((H_orig - (row_rois * roi_size_row)) / 2))
+    end_row = start_row + (row_rois * roi_size_row)
+    start_col = int(round((W_orig - (col_rois * roi_size_col)) / 2))
+    end_col = start_col + (col_rois * roi_size_col)
     
     central_roi = image_array[start_row:end_row, start_col:end_col]
     coords = (start_row, start_col, end_row, end_col)
-    percent = 100.0 * (new_H * new_W) / (H_orig * W_orig) if H_orig * W_orig > 0 else 0.0
+    percent = 100.0 * ((end_row - start_row) * (end_col - start_col)) / (H_orig * W_orig) if H_orig * W_orig > 0 else 0.0
     
     return central_roi, coords, percent
 
-def _compute_moving_roi_params(pixel_spacing_row, pixel_spacing_col, roi_size_mm=30.0, step_size_mm=15.0):
+def _compute_moving_roi_params(pixel_spacing_row, pixel_spacing_col, roi_size_mm=30.0):
     """Compute moving ROI dimensions and step sizes in pixels.
     
     Args:
@@ -65,11 +78,19 @@ def _compute_moving_roi_params(pixel_spacing_row, pixel_spacing_col, roi_size_mm
     
     Returns:
         Tuple of (roi_h_px, roi_w_px, step_h_px, step_w_px)
+
+    Defaults:
+        step_size_px: half the roi_size_px
+    
     """
     roi_h_px = int(round(roi_size_mm / pixel_spacing_row))
+    if roi_h_px % 2 != 0:
+        roi_h_px = roi_h_px + 1
     roi_w_px = int(round(roi_size_mm / pixel_spacing_col))
-    step_h_px = max(1, int(round(step_size_mm / pixel_spacing_row)))
-    step_w_px = max(1, int(round(step_size_mm / pixel_spacing_col)))
+    if roi_w_px % 2 != 0:
+        roi_w_px = roi_w_px + 1
+    step_h_px = max(1, int(round(roi_h_px / 2)))
+    step_w_px = max(1, int(round(roi_w_px / 2)))
     
     return roi_h_px, roi_w_px, step_h_px, step_w_px
 
@@ -142,14 +163,15 @@ def calculate_xray_uniformity_metrics(image_array, pixel_spacing_row, pixel_spac
 
     The process involves:
     1. Defining a central ROI (80% of total image area).
-    2. Calculating Mean Pixel Value (MeanPV_central) and Standard Deviation (MeanSD_central) of this central ROI.
+    2. Calculating Mean Pixel Value (MeanPV_central) and Standard Deviation (MeanSD_central) of the central ROI (80% ot total image area).
     3. Performing a sliding window analysis with a 30mm x 30mm ROI moving in 15mm steps within the central ROI.
     4. For each moving ROI, its local mean (PV_i) and local standard deviation (SD_i) are found.
-    5. Calculating:
-        - GU_PV: Max(abs(PV_i - MeanPV_central) / abs(MeanPV_central))
-        - LU_PV: Max(abs(PV_i - PV_8n) / abs(PV_8n)) (PV_8n is mean of 8 neighbors' PVs)
-        - GU_SNR: Max(abs(SNR_i - MeanSNR_central) / abs(MeanSNR_central)), where SNR = PV/SD
-        - LU_SNR: Max(abs(SNR_i - SNR_8n) / abs(SNR_8n)) (SNR_8n is mean of 8 neighbors' SNRs)
+    5. Calculating Mean Pixel Value (MeanPV_i) and Standard Deviation (MeanSD_i) of the moving ROIs.
+    6. Calculating:
+        - GU_PV: Max(abs(PV_i - MeanPV_i) / MeanPV_i)
+        - LU_PV: Max(abs(PV_i - PV_8n) / PV_8n) (PV_8n is mean of 8 neighbors' PVs)
+        - GU_SNR: Max(abs(SNR_i - MeanSNR_i) / MeanSNR_i), where SNR = PV/SD
+        - LU_SNR: Max(abs(SNR_i - SNR_8n) / SNR_8n) (SNR_8n is mean of 8 neighbors' SNRs)
 
     Args:
         image_array (np.ndarray): The 2D NumPy array representing the X-ray image pixels.
@@ -182,15 +204,25 @@ def calculate_xray_uniformity_metrics(image_array, pixel_spacing_row, pixel_spac
         "moving_roi_sds": np.array([]).reshape(0,0)
     }
 
-    # --- 1. Extract central ROI (80% of total area) ---
-    central_roi_data, central_roi_coords, central_roi_percent = _compute_central_roi(image_array)
+    # --- 1. Extract central ROI (80% of total area with 30mm x 30mm ROIs) ---
+    central_roi_data, central_roi_coords, central_roi_percent = _compute_central_roi(image_array, pixel_spacing_row, pixel_spacing_col)
     
     if central_roi_data is None or central_roi_data.size == 0:
         if central_roi_coords:
             nan_results["central_roi_coords"] = central_roi_coords
         return nan_results
 
-    # --- 2. Define moving ROI parameters (30mm x 30mm, step 15mm) ---
+    # --- 2. Calculating Mean Pixel Value (MeanPV_central) and Standard Deviation (MeanSD_central) of the central ROI ---
+    MeanPV_central = np.mean(central_roi_data)
+    MeanSD_central = np.std(central_roi_data)
+     
+    # Compute SNR robustly: if local_sd is zero or not finite, set SNR to NaN
+    if not np.isfinite(MeanSD_central) or np.isclose(MeanSD_central, 0.0):
+        MeanSNR_central = np.nan
+    else:
+        MeanSNR_central = MeanPV_central / MeanSD_central
+        
+    # --- 3. Define moving ROI parameters (30mm x 30mm, step 15mm) ---
     roi_h_px, roi_w_px, step_h_px, step_w_px = _compute_moving_roi_params(pixel_spacing_row, pixel_spacing_col)
     
     base_results = {
@@ -271,19 +303,19 @@ def calculate_xray_uniformity_metrics(image_array, pixel_spacing_row, pixel_spac
     # Compute central means from the moving ROI grids
     # Use nanmean to ignore invalid/missing ROIs
     if np.isfinite(pv_grid).any():
-        MeanPV_central = np.nanmean(pv_grid)
+        MeanPV_i = np.nanmean(pv_grid)
     else:
-        MeanPV_central = np.nan
+        MeanPV_i = np.nan
 
     if np.isfinite(sd_grid).any():
-        MeanSD_central = np.nanmean(sd_grid)
+        MeanSD_i = np.nanmean(sd_grid)
     else:
-        MeanSD_central = np.nan
+        MeanSD_i = np.nan
 
     if np.isfinite(snr_grid).any():
-        MeanSNR_central = np.nanmean(snr_grid)
+        MeanSNR_i = np.nanmean(snr_grid)
     else:
-        MeanSNR_central = np.nan
+        MeanSNR_i = np.nan
 
     for r_idx in range(num_rois_y):
         for c_idx in range(num_rois_x):
@@ -295,11 +327,11 @@ def calculate_xray_uniformity_metrics(image_array, pixel_spacing_row, pixel_spac
                 continue
 
             # Global Uniformity terms (append only if finite)
-            gu_pv_term = _calculate_uniformity_term(pv_i, MeanPV_central)
+            gu_pv_term = _calculate_uniformity_term(pv_i, MeanPV_i)
             if np.isfinite(gu_pv_term):
                 gu_pv_terms.append(gu_pv_term)
 
-            gu_snr_term = _calculate_uniformity_term(snr_i, MeanSNR_central)
+            gu_snr_term = _calculate_uniformity_term(snr_i, MeanSNR_i)
             if np.isfinite(gu_snr_term):
                 gu_snr_terms.append(gu_snr_term)
 
@@ -330,9 +362,9 @@ def calculate_xray_uniformity_metrics(image_array, pixel_spacing_row, pixel_spac
         "LU_PV": LU_PV,
         "GU_SNR": GU_SNR,
         "LU_SNR": LU_SNR,
-        "MeanPV_central": abs(MeanPV_central),
+        "MeanPV_central": MeanPV_central,
         "MeanSD_central": MeanSD_central,
-        "MeanSNR_central": abs(MeanSNR_central),
+        "MeanSNR_central": MeanSNR_central,
         "central_roi_coords": central_roi_coords,
         "num_moving_rois": num_rois_y * num_rois_x,
         "central_roi_percent": central_roi_percent,
