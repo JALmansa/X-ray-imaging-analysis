@@ -40,7 +40,7 @@ def _compute_central_roi(image_array, pixel_spacing_row, pixel_spacing_col, roi_
         - percent: Percentage of total image area
     """
     H_orig, W_orig = image_array.shape
-    scale_factor = np.sqrt(0.8)
+    scale_factor = 0.9 #np.sqrt(0.8)
     new_H, new_W = int(round(H_orig * scale_factor)), int(round(W_orig * scale_factor))
     
     if new_H < 1 or new_W < 1:
@@ -52,19 +52,19 @@ def _compute_central_roi(image_array, pixel_spacing_row, pixel_spacing_col, roi_
     roi_size_col = int(round(roi_size_mm / pixel_spacing_col))
     if roi_size_col % 2 != 0:
         roi_size_col = roi_size_col + 1
-
-    row_rois = int(new_H / roi_size_row)
-    col_rois = int(new_W / roi_size_col)
+        
+    row_rois = int(round(new_H / roi_size_row))
+    col_rois = int(round(new_W / roi_size_col))
     
     start_row = int(round((H_orig - (row_rois * roi_size_row)) / 2))
     end_row = start_row + (row_rois * roi_size_row)
     start_col = int(round((W_orig - (col_rois * roi_size_col)) / 2))
     end_col = start_col + (col_rois * roi_size_col)
-    
+
     central_roi = image_array[start_row:end_row, start_col:end_col]
     coords = (start_row, start_col, end_row, end_col)
     percent = 100.0 * ((end_row - start_row) * (end_col - start_col)) / (H_orig * W_orig) if H_orig * W_orig > 0 else 0.0
-    
+
     return central_roi, coords, percent
 
 def _compute_moving_roi_params(pixel_spacing_row, pixel_spacing_col, roi_size_mm=30.0):
@@ -410,11 +410,13 @@ def display_uniformity_analysis_section(image_array, pixel_spacing_row, pixel_sp
                         st.metric("Moving ROI grid (rows x cols)", f"{results['moving_roi_grid_shape'][0]} x {results['moving_roi_grid_shape'][1]}")
                         st.metric("Global Uniformity (PV)", f"{results['GU_PV']:.2f}%")
                         st.metric("Local Uniformity (PV)", f"{results['LU_PV']:.2f}%")
+                        st.metric("Central ROI Mean (PV)", f"{results['MeanPV_central']:.2f}")
                     with col2:
                         st.metric("Number of moving ROIs", f"{results['num_moving_rois']:.0f}")
                         st.metric("Invalid ROIs (PV or SNR NaN)", f"{results['num_invalid_rois']:.0f}")
                         st.metric("Global Uniformity (SNR)", f"{results['GU_SNR']:.2f}%")
                         st.metric("Local Uniformity (SNR)", f"{results['LU_SNR']:.2f}%")
+                        st.metric("Central ROI Mean (SNR)", f"{results['MeanSNR_central']:.2f}")
 
                 except ValueError as ve:
                     st.error(f"Uniformity analysis failed due to invalid input: {ve}")
